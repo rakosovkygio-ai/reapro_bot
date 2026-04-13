@@ -13,7 +13,7 @@ from telegram.ext import (
 load_dotenv()
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-WP_API_BASE = os.environ.get("WP_API_BASE", "").strip()
+WP_API_BASE = os.environ.get("WP_API_BASE", "").strip().rstrip("/")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "").strip()
 
 logging.basicConfig(
@@ -23,41 +23,76 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def wp_resolve_booking(token: str, telegram_chat_id: int) -> dict | None:
-    try:
-        url = f"{WP_API_BASE}/telegram/resolve"
+def normalize_token(token: str) -> str:
+    token = (token or "").strip()
 
+    if token.startswith("mb_"):
+        token = token[3:]
+
+    return token
+
+
+def wp_resolve_booking(token: str, telegram_chat_id: int) -> tuple[dict | None, str | None]:
+    token = normalize_token(token)
+
+    if not token:
+        return None, "Пустой token"
+
+    url = f"{WP_API_BASE}/telegram/resolve"
+    payload = {
+        "token": token,
+        "telegram_chat_id": str(telegram_chat_id),
+    }
+
+    try:
         print("REQUEST URL:", url)
-        print("REQUEST TOKEN:", token)
-        print("REQUEST TELEGRAM ID:", telegram_chat_id)
+        print("REQUEST JSON:", payload)
 
         response = requests.post(
             url,
-            json={
-                "token": token,
-                "telegram_chat_id": str(telegram_chat_id),
-            },
+            json=payload,
             timeout=20,
         )
 
         print("STATUS CODE:", response.status_code)
         print("RESPONSE TEXT:", response.text)
 
-        if response.status_code != 200:
-            return None
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
 
-        data = response.json()
+        if response.status_code != 200:
+            if data and isinstance(data, dict):
+                message = data.get("message") or f"HTTP {response.status_code}"
+                return None, f"WordPress вернул {response.status_code}: {message}"
+
+            return None, f"WordPress вернул HTTP {response.status_code}"
+
+        if not data or not isinstance(data, dict):
+            return None, "WordPress вернул невалидный JSON"
+
         print("JSON DATA:", data)
 
         if not data.get("success"):
-            return None
+            return None, data.get("message") or "WordPress вернул success=false"
 
-        return data.get("booking")
+        booking = data.get("booking")
 
+        if not booking:
+            return None, "В ответе нет booking"
+
+        return booking, None
+
+    except requests.Timeout:
+        logger.exception("WP resolve timeout")
+        return None, "WordPress не ответил вовремя"
+    except requests.RequestException as e:
+        logger.exception("WP resolve request failed: %s", e)
+        return None, f"Ошибка запроса к WordPress: {e}"
     except Exception as e:
-        print("WP RESOLVE EXCEPTION:", repr(e))
         logger.exception("WP resolve failed: %s", e)
-        return None
+        return None, f"Неожиданная ошибка: {e}"
 
 
 def format_booking_text(booking: dict) -> str:
@@ -92,25 +127,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     print("START CALLED")
     print("USER ID:", telegram_chat_id)
-    print("PAYLOAD:", payload)
+    print("RAW PAYLOAD:", payload)
 
-    if payload.startswith("mb_"):
-        token = payload[3:]
+    if payload:
+        token = normalize_token(payload)
+
+        print("NORMALIZED TOKEN:", token)
 
         await update.message.reply_text(f"Токен получен: {token}")
         await update.message.reply_text("Проверяю запись в WordPress...")
 
-        booking = wp_resolve_booking(token=token, telegram_chat_id=telegram_chat_id)
+        booking, error_message = wp_resolve_booking(
+            token=token,
+            telegram_chat_id=telegram_chat_id,
+        )
 
         print("BOOKING RESULT:", booking)
+        print("BOOKING ERROR:", error_message)
 
         if booking:
             await update.message.reply_text(format_booking_text(booking))
             return
 
         await update.message.reply_text(
-            "⚠️ WordPress не вернул запись.\n"
-            "Смотри консоль бота и проверь endpoint."
+            "⚠️ Не удалось получить запись из WordPress.\n"
+            f"Причина: {error_message or 'неизвестная ошибка'}"
         )
         return
 
@@ -150,10 +191,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Ручной тест:
-    /test TOKEN
-    """
     if not update.message:
         return
 
@@ -165,18 +202,18 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Использование: /test TOKEN")
         return
 
-    token = context.args[0].strip()
+    token = normalize_token(context.args[0])
 
     await update.message.reply_text(f"Проверяю токен: {token}")
 
-    booking = wp_resolve_booking(token=token, telegram_chat_id=user.id)
+    booking, error_message = wp_resolve_booking(token=token, telegram_chat_id=user.id)
 
     if booking:
         await update.message.reply_text("Тест успешен.\n\n" + format_booking_text(booking))
     else:
         await update.message.reply_text(
             "Тест неуспешен.\n"
-            "WordPress не вернул запись или endpoint ещё не настроен."
+            f"Причина: {error_message or 'endpoint ещё не настроен'}"
         )
 
 
