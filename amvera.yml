@@ -2,8 +2,7 @@ meta:
   environment: python
   toolchain:
     name: pip
-    version: "3.12"
+    version: 3.11
 
 run:
-  command: python
-  args: bot.py
+  scriptName: bot.py
