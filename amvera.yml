@@ -2,10 +2,8 @@ meta:
   environment: python
   toolchain:
     name: pip
-    version: 3.11
-
-build:
-  requirementsPath: requirements.txt
+    version: "3.12"
 
 run:
-  scriptName: bot.py
+  command: python
+  args: bot.py
