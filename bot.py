@@ -4,7 +4,7 @@ import asyncio
 import requests
 
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -31,21 +31,6 @@ def normalize_token(token: str) -> str:
     if token.startswith("mb_"):
         token = token[3:]
     return token
-
-
-def normalize_phone_for_tel(phone: str) -> str:
-    return ''.join(ch for ch in str(phone or '') if ch.isdigit() or ch == '+')
-
-
-def build_phone_keyboard(phone: str) -> InlineKeyboardMarkup | None:
-    tel_phone = normalize_phone_for_tel(phone)
-
-    if not tel_phone:
-        return None
-
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📞 Позвонить", url=f"tel:{tel_phone}")]
-    ])
 
 
 def wp_resolve_booking(token: str, telegram_chat_id: int) -> tuple[dict | None, str | None]:
@@ -224,11 +209,7 @@ async def send_booking_extras(message, booking: dict) -> None:
         await message.reply_text(f"📍 Адрес: {address}")
 
     if specialist_phone:
-        keyboard = build_phone_keyboard(specialist_phone)
-        await message.reply_text(
-            f"📞 Телефон специалиста: {specialist_phone}",
-            reply_markup=keyboard,
-        )
+        await message.reply_text(f"📞 Телефон специалиста: {specialist_phone}")
 
     if map_link:
         await message.reply_text(f"🗺 Как добраться:\n{map_link}")
@@ -243,12 +224,7 @@ async def send_reminder_extras(bot, chat_id: int, item: dict) -> None:
         await bot.send_message(chat_id=chat_id, text=f"📍 Адрес: {address}")
 
     if specialist_phone:
-        keyboard = build_phone_keyboard(specialist_phone)
-        await bot.send_message(
-            chat_id=chat_id,
-            text=f"📞 Телефон специалиста: {specialist_phone}",
-            reply_markup=keyboard,
-        )
+        await bot.send_message(chat_id=chat_id, text=f"📞 Телефон специалиста: {specialist_phone}")
 
     if map_link:
         await bot.send_message(chat_id=chat_id, text=f"🗺 Как добраться:\n{map_link}")
