@@ -209,7 +209,14 @@ async def send_booking_extras(message, booking: dict) -> None:
         await message.reply_text(f"📍 Адрес: {address}")
 
     if specialist_phone:
-        await message.reply_text(f"📞 Телефон специалиста: {specialist_phone}")
+        clean_phone = specialist_phone.replace('-', '').replace(' ', '')
+    
+        await message.reply_text(
+            "📞 Телефон специалиста:\n"
+            f"`{clean_phone}`\n\n"
+            "Нажмите, чтобы скопировать",
+            parse_mode="Markdown"
+        )
 
     if map_link:
         await message.reply_text(f"🗺 Как добраться:\n{map_link}")
@@ -224,7 +231,17 @@ async def send_reminder_extras(bot, chat_id: int, item: dict) -> None:
         await bot.send_message(chat_id=chat_id, text=f"📍 Адрес: {address}")
 
     if specialist_phone:
-        await bot.send_message(chat_id=chat_id, text=f"📞 Телефон специалиста: {specialist_phone}")
+        clean_phone = specialist_phone.replace('-', '').replace(' ', '')
+    
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "📞 Телефон специалиста:\n"
+                f"`{clean_phone}`\n\n"
+                "Нажмите, чтобы скопировать"
+            ),
+            parse_mode="Markdown"
+        )
 
     if map_link:
         await bot.send_message(chat_id=chat_id, text=f"🗺 Как добраться:\n{map_link}")
