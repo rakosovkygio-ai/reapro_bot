@@ -526,15 +526,38 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     items, error = wp_get_today_appointments()
 
     if error:
-        await update.message.reply_text(f"Ошибка получения записей: {error}")
+        await update.message.reply_text(f"❌ Ошибка получения записей: {error}")
         return
 
     if not items:
-        await update.message.reply_text("На сегодня записей нет.")
+        await update.message.reply_text("📭 На сегодня записей нет.")
         return
 
-    for item in items:
+    status_labels = {
+        "new": "🆕 Новая",
+        "confirmed": "✅ Подтверждена",
+        "completed": "✔️ Завершена",
+        "canceled": "❌ Отменена",
+        "no_show": "🚫 Не пришёл",
+    }
+
+    for index, item in enumerate(items, start=1):
         status = (item.get("status") or "").strip()
+        status_label = status_labels.get(status, status or "—")
+
+        start_time = str(item.get("start_time", "—"))[:5]
+        end_time = str(item.get("end_time", "—"))[:5]
+
+        text = (
+            f"🗓 <b>Запись #{index}</b>\n\n"
+            f"👤 <b>Клиент:</b> {item.get('client_name', '—')}\n"
+            f"📞 <b>Телефон:</b> {item.get('client_phone', '—')}\n\n"
+            f"💼 <b>Услуга:</b> {item.get('service_name', '—')}\n"
+            f"👨‍⚕️ <b>Специалист:</b> {item.get('employee_name', '—')}\n\n"
+            f"⏰ <b>Время:</b> {start_time}–{end_time}\n"
+            f"📌 <b>Статус:</b> {status_label}"
+        )
+
         buttons = []
 
         if status != "completed":
@@ -545,7 +568,7 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 )
             ])
 
-        if status != "confirmed":
+        if status != "confirmed" and status != "completed":
             buttons.append([
                 InlineKeyboardButton(
                     "Подтвердить",
@@ -560,9 +583,32 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
 
         await update.message.reply_text(
-            format_admin_today_appointment(item),
+            text,
+            parse_mode="HTML",
             reply_markup=reply_markup,
         )
+
+    total = len(items)
+    confirmed = sum(1 for i in items if i.get("status") == "confirmed")
+    completed = sum(1 for i in items if i.get("status") == "completed")
+    new = sum(1 for i in items if i.get("status") == "new")
+    canceled = sum(1 for i in items if i.get("status") == "canceled")
+    no_show = sum(1 for i in items if i.get("status") == "no_show")
+
+    summary_text = (
+        "📊 <b>Сводка за сегодня</b>\n\n"
+        f"📅 Всего записей: <b>{total}</b>\n\n"
+        f"🆕 Новые: <b>{new}</b>\n"
+        f"✅ Подтверждены: <b>{confirmed}</b>\n"
+        f"✔️ Завершены: <b>{completed}</b>\n"
+        f"❌ Отменены: <b>{canceled}</b>\n"
+        f"🚫 Не пришёл: <b>{no_show}</b>"
+    )
+
+    await update.message.reply_text(
+        summary_text,
+        parse_mode="HTML",
+    )
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
