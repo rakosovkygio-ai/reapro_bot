@@ -50,15 +50,21 @@ def is_admin(user_id: int) -> bool:
 
 
 def get_main_keyboard(user_id: int | None = None) -> ReplyKeyboardMarkup:
-    rows = [
-        ["Мои записи", "Ближайшая запись"],
-        ["Связаться"],
-    ]
-
     if user_id is not None and is_admin(user_id):
-        rows.insert(1, ["📅 Записи на сегодня"])
+        return ReplyKeyboardMarkup(
+            [
+                ["📅 Записи на сегодня"],
+            ],
+            resize_keyboard=True,
+        )
 
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        [
+            ["Мои записи", "Ближайшая запись"],
+            ["Связаться"],
+        ],
+        resize_keyboard=True,
+    )
 
 
 def normalize_token(token: str) -> str:
@@ -679,7 +685,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await context.bot.send_message(
                 chat_id=int(client_chat_id),
                 text="Выберите действие:",
-                reply_markup=get_main_keyboard(),
+                reply_markup=get_main_keyboard(int(client_chat_id)),
             )
         except Exception as e:
             logger.exception("Failed to notify client after admin action: %s", e)
