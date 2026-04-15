@@ -26,6 +26,12 @@ WP_API_BASE = os.environ.get("WP_API_BASE", "").strip().rstrip("/")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "").strip()
 TELEGRAM_ADMIN_SECRET = os.environ.get("TELEGRAM_ADMIN_SECRET", "").strip()
 
+ADMIN_TELEGRAM_IDS = {
+    int(x.strip())
+    for x in os.environ.get("ADMIN_TELEGRAM_IDS", "").split(",")
+    if x.strip().isdigit()
+}
+
 REMINDER_POLL_SECONDS = 60
 
 CONTACT_ADDRESS = "Ростовская обл. г. Таганрог, ул. Октябрьская 17, 2 этаж, каб. 204"
@@ -39,14 +45,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def get_main_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [
-            ["Мои записи", "Ближайшая запись"],
-            ["Связаться"],
-        ],
-        resize_keyboard=True,
-    )
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_TELEGRAM_IDS
+
+
+def get_main_keyboard(user_id: int | None = None) -> ReplyKeyboardMarkup:
+    rows = [
+        ["Мои записи", "Ближайшая запись"],
+        ["Связаться"],
+    ]
+
+    if user_id is not None and is_admin(user_id):
+        rows.insert(1, ["📅 Записи на сегодня"])
+
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 def normalize_token(token: str) -> str:
@@ -363,10 +375,10 @@ async def send_reminder_extras(bot, chat_id: int, item: dict) -> None:
         await bot.send_message(chat_id=chat_id, text=f"🗺 Как добраться:\n{map_link}")
 
 
-async def send_main_menu(target) -> None:
+async def send_main_menu(target, user_id: int | None = None) -> None:
     await target.reply_text(
         "Выберите действие:",
-        reply_markup=get_main_keyboard(),
+        reply_markup=get_main_keyboard(user_id),
     )
 
 
@@ -435,12 +447,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if booking:
             await update.message.reply_text(format_booking_text(booking))
             await send_booking_extras(update.message, booking)
-            await send_main_menu(update.message)
+            await send_main_menu(update.message, telegram_user_id)
             return
 
         await update.message.reply_text(
             "Не удалось привязать ваш Telegram. Пожалуйста, вернитесь на сайт и попробуйте снова.",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_keyboard(telegram_user_id),
         )
         logger.warning("Booking resolve failed: %s", error_message)
         return
@@ -449,22 +461,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if booking:
         await update.message.reply_text(format_current_booking_text(booking))
-        await send_main_menu(update.message)
+        await send_main_menu(update.message, telegram_user_id)
         return
 
     await update.message.reply_text(
         "Здравствуйте. Перейдите в бот по персональной ссылке с сайта, чтобы подключить уведомления.",
-        reply_markup=get_main_keyboard(),
+        reply_markup=get_main_keyboard(telegram_user_id),
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
+    if not update.message or not update.effective_user:
         return
 
     await update.message.reply_text(
         "Используйте кнопки ниже, чтобы посмотреть записи или контакты.",
-        reply_markup=get_main_keyboard(),
+        reply_markup=get_main_keyboard(update.effective_user.id),
     )
 
 
@@ -473,7 +485,10 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     if not context.args:
-        await update.message.reply_text("Использование: /test TOKEN", reply_markup=get_main_keyboard())
+        await update.message.reply_text(
+            "Использование: /test TOKEN",
+            reply_markup=get_main_keyboard(update.effective_user.id),
+        )
         return
 
     token = normalize_token(context.args[0])
@@ -486,16 +501,20 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if booking:
         await update.message.reply_text(format_booking_text(booking))
         await send_booking_extras(update.message, booking)
-        await send_main_menu(update.message)
+        await send_main_menu(update.message, update.effective_user.id)
     else:
         await update.message.reply_text(
             f"Тест неуспешен.\nПричина: {error_message or 'endpoint ещё не настроен'}",
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_keyboard(update.effective_user.id),
         )
 
 
 async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
+    if not update.message or not update.effective_user:
+        return
+
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Нет доступа")
         return
 
     items, error = wp_get_today_appointments()
@@ -553,13 +572,13 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if error and not items:
             await update.message.reply_text(
                 "Не удалось получить историю посещений. Убедитесь, что Telegram уже привязан через персональную ссылку.",
-                reply_markup=get_main_keyboard(),
+                reply_markup=get_main_keyboard(telegram_user_id),
             )
             return
 
         await update.message.reply_text(
             format_bookings_list_text(items),
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_keyboard(telegram_user_id),
         )
         return
 
@@ -569,39 +588,51 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if error and not booking:
             await update.message.reply_text(
                 "Не удалось получить ближайшую запись. Убедитесь, что Telegram уже привязан через персональную ссылку.",
-                reply_markup=get_main_keyboard(),
+                reply_markup=get_main_keyboard(telegram_user_id),
             )
             return
 
         await update.message.reply_text(
             format_current_booking_text(booking),
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_keyboard(telegram_user_id),
         )
 
         if booking:
             await send_booking_extras(update.message, booking)
-            await send_main_menu(update.message)
+            await send_main_menu(update.message, telegram_user_id)
         return
 
     if text == "Связаться":
         await update.message.reply_text(
             format_contact_text(),
-            reply_markup=get_main_keyboard(),
+            reply_markup=get_main_keyboard(telegram_user_id),
         )
+        return
+
+    if text == "📅 Записи на сегодня":
+        if not is_admin(telegram_user_id):
+            await update.message.reply_text("Нет доступа")
+            return
+
+        await today_command(update, context)
         return
 
     await update.message.reply_text(
         "Используйте кнопки ниже.",
-        reply_markup=get_main_keyboard(),
+        reply_markup=get_main_keyboard(telegram_user_id),
     )
 
 
 async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if not query:
+    if not query or not update.effective_user:
         return
 
     await query.answer()
+
+    if not is_admin(update.effective_user.id):
+        await query.edit_message_text("Нет доступа")
+        return
 
     data = query.data or ''
     if ':' not in data:
@@ -631,8 +662,10 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         status_label = 'завершена'
 
+    current_text = query.message.text_html if query.message and query.message.text_html else "Статус обновлен"
+
     await query.edit_message_text(
-        query.message.text_html + f"\n\n<b>Статус:</b> {status_label}",
+        current_text + f"\n\n<b>Статус:</b> {status_label}",
         parse_mode="HTML"
     )
 
