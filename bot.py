@@ -4,12 +4,19 @@ import asyncio
 import requests
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 load_dotenv()
@@ -21,6 +28,10 @@ TELEGRAM_ADMIN_SECRET = os.environ.get("TELEGRAM_ADMIN_SECRET", "").strip()
 
 REMINDER_POLL_SECONDS = 60
 
+CONTACT_ADDRESS = "Ростовская обл. г. Таганрог, ул. Октябрьская 17, 2 этаж, каб. 204"
+CONTACT_PHONE = "+7 995 445-85-20"
+CONTACT_MAP_LINK = "https://yandex.com/maps/-/CPrtN4iF"
+
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     level=logging.INFO,
@@ -28,23 +39,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def get_main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            ["Мои записи", "Ближайшая запись"],
+            ["Связаться"],
+        ],
+        resize_keyboard=True,
+    )
+
+
 def normalize_token(token: str) -> str:
-    token = (token or "").strip()
-    if token.startswith("mb_"):
-        token = token[3:]
-    return token
+    return (token or "").strip()
 
 
-def wp_resolve_booking(token: str, telegram_chat_id: int) -> tuple[dict | None, str | None]:
+def wp_resolve_booking(token: str, telegram_chat_id: int, telegram_user_id: int) -> tuple[dict | None, str | None]:
     token = normalize_token(token)
 
     if not token:
         return None, "Пустой token"
 
-    url = f"{WP_API_BASE}/telegram/resolve"
+    url = f"{WP_API_BASE}/telegram/client-link"
     payload = {
         "token": token,
         "telegram_chat_id": str(telegram_chat_id),
+        "telegram_user_id": str(telegram_user_id),
     }
 
     try:
@@ -62,6 +81,77 @@ def wp_resolve_booking(token: str, telegram_chat_id: int) -> tuple[dict | None, 
     except Exception as e:
         logger.exception("wp_resolve_booking failed: %s", e)
         return None, str(e)
+
+
+def wp_get_client_current_booking(telegram_user_id: int) -> tuple[dict | None, str | None]:
+    url = f"{WP_API_BASE}/telegram/client-current"
+    params = {
+        "telegram_user_id": str(telegram_user_id),
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=20)
+        data = response.json()
+
+        if response.status_code != 200:
+            return None, data.get("message") if isinstance(data, dict) else f"HTTP {response.status_code}"
+
+        if not isinstance(data, dict) or not data.get("success"):
+            return None, "client current failed"
+
+        return data.get("booking"), None
+
+    except Exception as e:
+        logger.exception("wp_get_client_current_booking failed: %s", e)
+        return None, str(e)
+
+
+def wp_get_client_bookings(telegram_user_id: int) -> tuple[list[dict], str | None]:
+    url = f"{WP_API_BASE}/telegram/client-bookings"
+    params = {
+        "telegram_user_id": str(telegram_user_id),
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=20)
+        data = response.json()
+
+        if response.status_code != 200:
+            return [], data.get("message") if isinstance(data, dict) else f"HTTP {response.status_code}"
+
+        if not isinstance(data, dict) or not data.get("success"):
+            return [], "client bookings failed"
+
+        items = data.get("items") or []
+        return items if isinstance(items, list) else [], None
+
+    except Exception as e:
+        logger.exception("wp_get_client_bookings failed: %s", e)
+        return [], str(e)
+
+
+def wp_get_today_appointments() -> tuple[list[dict], str | None]:
+    url = f"{WP_API_BASE}/telegram/today-appointments"
+    params = {
+        "secret": TELEGRAM_ADMIN_SECRET,
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=20)
+        data = response.json()
+
+        if response.status_code != 200:
+            return [], data.get("message") if isinstance(data, dict) else f"HTTP {response.status_code}"
+
+        if not isinstance(data, dict) or not data.get("success"):
+            return [], "today appointments failed"
+
+        items = data.get("items") or []
+        return items if isinstance(items, list) else [], None
+
+    except Exception as e:
+        logger.exception("wp_get_today_appointments failed: %s", e)
+        return [], str(e)
 
 
 def wp_fetch_reminders() -> tuple[list[dict], str | None]:
@@ -137,6 +227,44 @@ def format_booking_text(booking: dict) -> str:
     )
 
 
+def format_current_booking_text(booking: dict | None) -> str:
+    if not booking:
+        return "У вас нет ближайшей активной записи."
+
+    return (
+        "📅 Ваша ближайшая запись\n\n"
+        f"Услуга: {booking.get('service_name', '—')}\n"
+        f"Специалист: {booking.get('employee_name', '—')}\n"
+        f"Дата: {booking.get('appointment_date', '—')}\n"
+        f"Время: {booking.get('start_time', '—')}–{booking.get('end_time', '—')}"
+    )
+
+
+def format_bookings_list_text(items: list[dict]) -> str:
+    if not items:
+        return "У вас пока нет истории посещений."
+
+    lines = ["🕘 История посещений\n"]
+    for index, item in enumerate(items, start=1):
+        lines.append(
+            f"{index}. {item.get('appointment_date', '—')}, "
+            f"{item.get('start_time', '—')}–{item.get('end_time', '—')}\n"
+            f"Услуга: {item.get('service_name', '—')}\n"
+            f"Специалист: {item.get('employee_name', '—')}"
+        )
+
+    return "\n\n".join(lines)
+
+
+def format_contact_text() -> str:
+    return (
+        "📍 Контакты\n\n"
+        f"Адрес: {CONTACT_ADDRESS}\n\n"
+        f"Телефон: {CONTACT_PHONE}\n\n"
+        f"Как добраться:\n{CONTACT_MAP_LINK}"
+    )
+
+
 def format_reminder_text(item: dict) -> str:
     reminder_type = (item.get("reminder_type") or "").strip()
 
@@ -158,7 +286,15 @@ def format_reminder_text(item: dict) -> str:
 
 def format_client_status_text(appointment: dict) -> str:
     status = appointment.get("status", "")
-    title = "✅ Ваша запись подтверждена" if status == "confirmed" else "❌ Ваша запись отменена"
+
+    if status == "confirmed":
+        title = "✅ Ваша запись подтверждена"
+    elif status == "canceled":
+        title = "❌ Ваша запись отменена"
+    elif status == "completed":
+        title = "✅ Ваша запись завершена"
+    else:
+        title = "ℹ️ Статус вашей записи изменён"
 
     return (
         f"{title}\n\n"
@@ -166,6 +302,19 @@ def format_client_status_text(appointment: dict) -> str:
         f"Специалист: {appointment.get('employee_name', '—')}\n"
         f"Дата: {appointment.get('appointment_date', '—')}\n"
         f"Время: {appointment.get('start_time', '—')}–{appointment.get('end_time', '—')}"
+    )
+
+
+def format_admin_today_appointment(item: dict) -> str:
+    return (
+        "🗓 Запись на сегодня\n\n"
+        f"Клиент: {item.get('client_name', '—')}\n"
+        f"Телефон: {item.get('client_phone', '—')}\n"
+        f"Услуга: {item.get('service_name', '—')}\n"
+        f"Специалист: {item.get('employee_name', '—')}\n"
+        f"Дата: {item.get('appointment_date', '—')}\n"
+        f"Время: {str(item.get('start_time', '—'))[:5]}–{str(item.get('end_time', '—'))[:5]}\n"
+        f"Статус: {item.get('status', '—')}"
     )
 
 
@@ -214,6 +363,13 @@ async def send_reminder_extras(bot, chat_id: int, item: dict) -> None:
         await bot.send_message(chat_id=chat_id, text=f"🗺 Как добраться:\n{map_link}")
 
 
+async def send_main_menu(target) -> None:
+    await target.reply_text(
+        "Выберите действие:",
+        reply_markup=get_main_keyboard(),
+    )
+
+
 async def reminder_loop(application) -> None:
     logger.info("Reminder loop started")
 
@@ -238,6 +394,11 @@ async def reminder_loop(application) -> None:
                             text=format_reminder_text(item),
                         )
                         await send_reminder_extras(application.bot, chat_id, item)
+                        await application.bot.send_message(
+                            chat_id=chat_id,
+                            text="Меню доступно ниже:",
+                            reply_markup=get_main_keyboard(),
+                        )
 
                         await asyncio.to_thread(
                             wp_mark_reminder_sent,
@@ -259,30 +420,52 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_user:
         return
 
-    telegram_chat_id = update.effective_user.id
+    telegram_chat_id = update.effective_chat.id
+    telegram_user_id = update.effective_user.id
     payload = context.args[0].strip() if context.args else ""
 
     if payload:
         token = normalize_token(payload)
-        booking, error_message = wp_resolve_booking(token=token, telegram_chat_id=telegram_chat_id)
+        booking, error_message = wp_resolve_booking(
+            token=token,
+            telegram_chat_id=telegram_chat_id,
+            telegram_user_id=telegram_user_id,
+        )
 
         if booking:
             await update.message.reply_text(format_booking_text(booking))
             await send_booking_extras(update.message, booking)
+            await send_main_menu(update.message)
             return
 
-        await update.message.reply_text("Не удалось найти вашу запись. Пожалуйста, вернитесь на сайт и попробуйте снова.")
+        await update.message.reply_text(
+            "Не удалось привязать ваш Telegram. Пожалуйста, вернитесь на сайт и попробуйте снова.",
+            reply_markup=get_main_keyboard(),
+        )
         logger.warning("Booking resolve failed: %s", error_message)
         return
 
-    await update.message.reply_text("Здравствуйте. Перейдите в бот по ссылке с сайта, чтобы подтвердить запись.")
+    booking, _ = wp_get_client_current_booking(telegram_user_id)
+
+    if booking:
+        await update.message.reply_text(format_current_booking_text(booking))
+        await send_main_menu(update.message)
+        return
+
+    await update.message.reply_text(
+        "Здравствуйте. Перейдите в бот по персональной ссылке с сайта, чтобы подключить уведомления.",
+        reply_markup=get_main_keyboard(),
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
 
-    await update.message.reply_text("Чтобы подключить Telegram-напоминания, перейдите в бот по ссылке после записи на сайте.")
+    await update.message.reply_text(
+        "Используйте кнопки ниже, чтобы посмотреть записи или контакты.",
+        reply_markup=get_main_keyboard(),
+    )
 
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -290,17 +473,127 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     if not context.args:
-        await update.message.reply_text("Использование: /test TOKEN")
+        await update.message.reply_text("Использование: /test TOKEN", reply_markup=get_main_keyboard())
         return
 
     token = normalize_token(context.args[0])
-    booking, error_message = wp_resolve_booking(token=token, telegram_chat_id=update.effective_user.id)
+    booking, error_message = wp_resolve_booking(
+        token=token,
+        telegram_chat_id=update.effective_chat.id,
+        telegram_user_id=update.effective_user.id,
+    )
 
     if booking:
         await update.message.reply_text(format_booking_text(booking))
         await send_booking_extras(update.message, booking)
+        await send_main_menu(update.message)
     else:
-        await update.message.reply_text(f"Тест неуспешен.\nПричина: {error_message or 'endpoint ещё не настроен'}")
+        await update.message.reply_text(
+            f"Тест неуспешен.\nПричина: {error_message or 'endpoint ещё не настроен'}",
+            reply_markup=get_main_keyboard(),
+        )
+
+
+async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    items, error = wp_get_today_appointments()
+
+    if error:
+        await update.message.reply_text(f"Ошибка получения записей: {error}")
+        return
+
+    if not items:
+        await update.message.reply_text("На сегодня записей нет.")
+        return
+
+    for item in items:
+        status = (item.get("status") or "").strip()
+        buttons = []
+
+        if status != "completed":
+            buttons.append([
+                InlineKeyboardButton(
+                    "✅ Завершить",
+                    callback_data=f"complete:{int(item['id'])}"
+                )
+            ])
+
+        if status != "confirmed":
+            buttons.append([
+                InlineKeyboardButton(
+                    "Подтвердить",
+                    callback_data=f"confirm:{int(item['id'])}"
+                ),
+                InlineKeyboardButton(
+                    "Отменить",
+                    callback_data=f"cancel:{int(item['id'])}"
+                )
+            ])
+
+        reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+
+        await update.message.reply_text(
+            format_admin_today_appointment(item),
+            reply_markup=reply_markup,
+        )
+
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+
+    text = (update.message.text or "").strip()
+    telegram_user_id = update.effective_user.id
+
+    if text == "Мои записи":
+        items, error = wp_get_client_bookings(telegram_user_id)
+
+        if error and not items:
+            await update.message.reply_text(
+                "Не удалось получить историю посещений. Убедитесь, что Telegram уже привязан через персональную ссылку.",
+                reply_markup=get_main_keyboard(),
+            )
+            return
+
+        await update.message.reply_text(
+            format_bookings_list_text(items),
+            reply_markup=get_main_keyboard(),
+        )
+        return
+
+    if text == "Ближайшая запись":
+        booking, error = wp_get_client_current_booking(telegram_user_id)
+
+        if error and not booking:
+            await update.message.reply_text(
+                "Не удалось получить ближайшую запись. Убедитесь, что Telegram уже привязан через персональную ссылку.",
+                reply_markup=get_main_keyboard(),
+            )
+            return
+
+        await update.message.reply_text(
+            format_current_booking_text(booking),
+            reply_markup=get_main_keyboard(),
+        )
+
+        if booking:
+            await send_booking_extras(update.message, booking)
+            await send_main_menu(update.message)
+        return
+
+    if text == "Связаться":
+        await update.message.reply_text(
+            format_contact_text(),
+            reply_markup=get_main_keyboard(),
+        )
+        return
+
+    await update.message.reply_text(
+        "Используйте кнопки ниже.",
+        reply_markup=get_main_keyboard(),
+    )
 
 
 async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -316,7 +609,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     action, appointment_id_raw = data.split(':', 1)
 
-    if action not in ['confirm', 'cancel']:
+    if action not in ['confirm', 'cancel', 'complete']:
         return
 
     try:
@@ -331,7 +624,12 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(f"Ошибка: {error or 'не удалось выполнить действие'}")
         return
 
-    status_label = 'подтверждена' if action == 'confirm' else 'отменена'
+    if action == 'confirm':
+        status_label = 'подтверждена'
+    elif action == 'cancel':
+        status_label = 'отменена'
+    else:
+        status_label = 'завершена'
 
     await query.edit_message_text(
         query.message.text_html + f"\n\n<b>Статус:</b> {status_label}",
@@ -344,6 +642,11 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await context.bot.send_message(
                 chat_id=int(client_chat_id),
                 text=format_client_status_text(appointment),
+            )
+            await context.bot.send_message(
+                chat_id=int(client_chat_id),
+                text="Выберите действие:",
+                reply_markup=get_main_keyboard(),
             )
         except Exception as e:
             logger.exception("Failed to notify client after admin action: %s", e)
@@ -386,7 +689,9 @@ def run() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("test", test_command))
+    app.add_handler(CommandHandler("today", today_command))
     app.add_handler(CallbackQueryHandler(handle_admin_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     logger.info("Booking bot started")
     app.run_polling()
