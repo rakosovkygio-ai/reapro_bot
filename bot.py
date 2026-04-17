@@ -44,6 +44,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+PENDING_COMPLETE_KEY = "pending_complete_amount"
+
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_TELEGRAM_IDS
@@ -69,6 +71,37 @@ def get_main_keyboard(user_id: int | None = None) -> ReplyKeyboardMarkup:
 
 def normalize_token(token: str) -> str:
     return (token or "").strip()
+
+
+def normalize_amount(value: str) -> float | None:
+    raw = (value or "").strip().replace(" ", "").replace(",", ".")
+    if raw == "":
+        return None
+
+    try:
+        amount = float(raw)
+    except ValueError:
+        return None
+
+    if amount < 0:
+        return None
+
+    return amount
+
+
+def format_money(amount: float | int | None) -> str:
+    if amount is None:
+        return "0 ₽"
+
+    try:
+        value = float(amount)
+    except (TypeError, ValueError):
+        return "0 ₽"
+
+    if value.is_integer():
+        return f"{int(value)} ₽"
+
+    return f"{value:.2f} ₽"
 
 
 def wp_resolve_booking(token: str, telegram_chat_id: int, telegram_user_id: int) -> tuple[dict | None, str | None]:
@@ -209,13 +242,16 @@ def wp_mark_reminder_sent(appointment_id: int, reminder_type: str) -> bool:
         return False
 
 
-def wp_admin_action(appointment_id: int, action: str) -> tuple[dict | None, str | None]:
+def wp_admin_action(appointment_id: int, action: str, actual_amount: float | None = None) -> tuple[dict | None, str | None]:
     url = f"{WP_API_BASE}/telegram/admin-action"
     payload = {
         "appointment_id": int(appointment_id),
         "action": action,
         "secret": TELEGRAM_ADMIN_SECRET,
     }
+
+    if actual_amount is not None:
+        payload["actual_amount"] = actual_amount
 
     try:
         response = requests.post(url, json=payload, timeout=20)
@@ -314,7 +350,7 @@ def format_client_status_text(appointment: dict) -> str:
     else:
         title = "ℹ️ Статус вашей записи изменён"
 
-    return (
+    text = (
         f"{title}\n\n"
         f"Услуга: {appointment.get('service_name', '—')}\n"
         f"Специалист: {appointment.get('employee_name', '—')}\n"
@@ -322,18 +358,10 @@ def format_client_status_text(appointment: dict) -> str:
         f"Время: {appointment.get('start_time', '—')}–{appointment.get('end_time', '—')}"
     )
 
+    if status == "completed":
+        text += f"\nОплата: {format_money(appointment.get('actual_amount'))}"
 
-def format_admin_today_appointment(item: dict) -> str:
-    return (
-        "🗓 Запись на сегодня\n\n"
-        f"Клиент: {item.get('client_name', '—')}\n"
-        f"Телефон: {item.get('client_phone', '—')}\n"
-        f"Услуга: {item.get('service_name', '—')}\n"
-        f"Специалист: {item.get('employee_name', '—')}\n"
-        f"Дата: {item.get('appointment_date', '—')}\n"
-        f"Время: {str(item.get('start_time', '—'))[:5]}–{str(item.get('end_time', '—'))[:5]}\n"
-        f"Статус: {item.get('status', '—')}"
-    )
+    return text
 
 
 async def send_booking_extras(message, booking: dict) -> None:
@@ -558,6 +586,9 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"📌 <b>Статус:</b> {status_label}"
         )
 
+        if status == "completed":
+            text += f"\n💰 <b>Сумма:</b> {format_money(item.get('actual_amount'))}"
+
         buttons = []
 
         if status != "completed":
@@ -617,6 +648,66 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     text = (update.message.text or "").strip()
     telegram_user_id = update.effective_user.id
+
+    pending_complete = context.user_data.get(PENDING_COMPLETE_KEY)
+
+    if pending_complete and is_admin(telegram_user_id):
+        amount = normalize_amount(text)
+
+        if amount is None:
+            await update.message.reply_text(
+                "Введите корректную сумму числом.\nНапример: 2500 или 2500.50"
+            )
+            return
+
+        appointment_id = int(pending_complete["appointment_id"])
+        client_name = pending_complete.get("client_name", "—")
+        service_name = pending_complete.get("service_name", "—")
+        appointment_date = pending_complete.get("appointment_date", "—")
+        time_range = pending_complete.get("time_range", "—")
+
+        appointment, error = wp_admin_action(
+            appointment_id=appointment_id,
+            action="complete",
+            actual_amount=amount,
+        )
+
+        if not appointment:
+            await update.message.reply_text(
+                f"Не удалось завершить запись.\nПричина: {error or 'неизвестная ошибка'}",
+                reply_markup=get_main_keyboard(telegram_user_id),
+            )
+            context.user_data.pop(PENDING_COMPLETE_KEY, None)
+            return
+
+        context.user_data.pop(PENDING_COMPLETE_KEY, None)
+
+        await update.message.reply_text(
+            "✅ Приём завершён\n\n"
+            f"Клиент: {client_name}\n"
+            f"Услуга: {service_name}\n"
+            f"Дата: {appointment_date}\n"
+            f"Время: {time_range}\n"
+            f"Сумма: {format_money(amount)}",
+            reply_markup=get_main_keyboard(telegram_user_id),
+        )
+
+        client_chat_id = (appointment.get("client_telegram_chat_id") or "").strip()
+        if client_chat_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=int(client_chat_id),
+                    text=format_client_status_text(appointment),
+                )
+                await context.bot.send_message(
+                    chat_id=int(client_chat_id),
+                    text="Выберите действие:",
+                    reply_markup=get_main_keyboard(int(client_chat_id)),
+                )
+            except Exception as e:
+                logger.exception("Failed to notify client after complete action: %s", e)
+
+        return
 
     if text == "Мои записи":
         items, error = wp_get_client_bookings(telegram_user_id)
@@ -701,6 +792,45 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("Некорректный ID записи.")
         return
 
+    current_text = query.message.text_html if query.message and query.message.text_html else "Статус обновлен"
+
+    if action == "complete":
+        client_name = "—"
+        service_name = "—"
+        appointment_date = "—"
+        time_range = "—"
+
+        if query.message and query.message.text:
+            plain_text = query.message.text
+            lines = plain_text.splitlines()
+            for line in lines:
+                if line.startswith("Клиент:"):
+                    client_name = line.replace("Клиент:", "", 1).strip()
+                elif line.startswith("Услуга:"):
+                    service_name = line.replace("Услуга:", "", 1).strip()
+                elif line.startswith("Дата:"):
+                    appointment_date = line.replace("Дата:", "", 1).strip()
+                elif line.startswith("Время:"):
+                    time_range = line.replace("Время:", "", 1).strip()
+
+        context.user_data[PENDING_COMPLETE_KEY] = {
+            "appointment_id": appointment_id,
+            "client_name": client_name,
+            "service_name": service_name,
+            "appointment_date": appointment_date,
+            "time_range": time_range,
+        }
+
+        await query.message.reply_text(
+            "Введите сумму приёма.\n\n"
+            f"Клиент: {client_name}\n"
+            f"Услуга: {service_name}\n"
+            f"Дата: {appointment_date}\n"
+            f"Время: {time_range}\n\n"
+            "Пример: 2500"
+        )
+        return
+
     appointment, error = wp_admin_action(appointment_id, action)
 
     if not appointment:
@@ -709,12 +839,8 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     if action == 'confirm':
         status_label = 'подтверждена'
-    elif action == 'cancel':
-        status_label = 'отменена'
     else:
-        status_label = 'завершена'
-
-    current_text = query.message.text_html if query.message and query.message.text_html else "Статус обновлен"
+        status_label = 'отменена'
 
     await query.edit_message_text(
         current_text + f"\n\n<b>Статус:</b> {status_label}",
