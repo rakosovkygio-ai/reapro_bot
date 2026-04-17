@@ -373,7 +373,7 @@ async def send_booking_extras(message, booking: dict) -> None:
         await message.reply_text(f"📍 Адрес: {address}")
 
     if specialist_phone:
-        clean_phone = specialist_phone.replace('-', '').replace(' ', '')
+        clean_phone = specialist_phone.replace("-", "").replace(" ", "")
         await message.reply_text(
             "📞 Телефон специалиста:\n"
             f"`{clean_phone}`\n\n"
@@ -394,7 +394,7 @@ async def send_reminder_extras(bot, chat_id: int, item: dict) -> None:
         await bot.send_message(chat_id=chat_id, text=f"📍 Адрес: {address}")
 
     if specialist_phone:
-        clean_phone = specialist_phone.replace('-', '').replace(' ', '')
+        clean_phone = specialist_phone.replace("-", "").replace(" ", "")
         await bot.send_message(
             chat_id=chat_id,
             text=(
@@ -582,6 +582,7 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"📞 <b>Телефон:</b> {item.get('client_phone', '—')}\n\n"
             f"💼 <b>Услуга:</b> {item.get('service_name', '—')}\n"
             f"👨‍⚕️ <b>Специалист:</b> {item.get('employee_name', '—')}\n\n"
+            f"📅 <b>Дата:</b> {item.get('appointment_date', '—')}\n"
             f"⏰ <b>Время:</b> {start_time}–{end_time}\n"
             f"📌 <b>Статус:</b> {status_label}"
         )
@@ -777,13 +778,13 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("Нет доступа")
         return
 
-    data = query.data or ''
-    if ':' not in data:
+    data = query.data or ""
+    if ":" not in data:
         return
 
-    action, appointment_id_raw = data.split(':', 1)
+    action, appointment_id_raw = data.split(":", 1)
 
-    if action not in ['confirm', 'cancel', 'complete']:
+    if action not in ["confirm", "cancel", "complete"]:
         return
 
     try:
@@ -793,6 +794,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     current_text = query.message.text_html if query.message and query.message.text_html else "Статус обновлен"
+    current_plain_text = query.message.text if query.message and query.message.text else ""
 
     if action == "complete":
         client_name = "—"
@@ -800,18 +802,19 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         appointment_date = "—"
         time_range = "—"
 
-        if query.message and query.message.text:
-            plain_text = query.message.text
-            lines = plain_text.splitlines()
-            for line in lines:
-                if line.startswith("Клиент:"):
-                    client_name = line.replace("Клиент:", "", 1).strip()
-                elif line.startswith("Услуга:"):
-                    service_name = line.replace("Услуга:", "", 1).strip()
-                elif line.startswith("Дата:"):
-                    appointment_date = line.replace("Дата:", "", 1).strip()
-                elif line.startswith("Время:"):
-                    time_range = line.replace("Время:", "", 1).strip()
+        lines = current_plain_text.splitlines()
+
+        for line in lines:
+            normalized = line.strip()
+
+            if "Клиент:" in normalized:
+                client_name = normalized.split("Клиент:", 1)[1].strip()
+            elif "Услуга:" in normalized:
+                service_name = normalized.split("Услуга:", 1)[1].strip()
+            elif "Дата:" in normalized:
+                appointment_date = normalized.split("Дата:", 1)[1].strip()
+            elif "Время:" in normalized:
+                time_range = normalized.split("Время:", 1)[1].strip()
 
         context.user_data[PENDING_COMPLETE_KEY] = {
             "appointment_id": appointment_id,
@@ -837,17 +840,17 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(f"Ошибка: {error or 'не удалось выполнить действие'}")
         return
 
-    if action == 'confirm':
-        status_label = 'подтверждена'
+    if action == "confirm":
+        status_label = "подтверждена"
     else:
-        status_label = 'отменена'
+        status_label = "отменена"
 
     await query.edit_message_text(
         current_text + f"\n\n<b>Статус:</b> {status_label}",
         parse_mode="HTML"
     )
 
-    client_chat_id = (appointment.get("client_telegram_chat_id") or '').strip()
+    client_chat_id = (appointment.get("client_telegram_chat_id") or "").strip()
     if client_chat_id:
         try:
             await context.bot.send_message(
