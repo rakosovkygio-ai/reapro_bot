@@ -563,6 +563,7 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     status_labels = {
         "new": "🆕 Новая",
+        "processed": "📌 Обработана",
         "confirmed": "✅ Подтверждена",
         "completed": "✔️ Завершена",
         "canceled": "❌ Отменена",
@@ -599,6 +600,14 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     callback_data=f"complete:{int(item['id'])}"
                 )
             ])
+            
+        if status == "new":
+            buttons.append([
+                InlineKeyboardButton(
+                "📌 Обработать",
+                    callback_data=f"process:{int(item['id'])}"
+                )
+            ])    
 
         if status != "confirmed" and status != "completed":
             buttons.append([
@@ -621,9 +630,10 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
     total = len(items)
+    new = sum(1 for i in items if i.get("status") == "new")
+    processed = sum(1 for i in items if i.get("status") == "processed")
     confirmed = sum(1 for i in items if i.get("status") == "confirmed")
     completed = sum(1 for i in items if i.get("status") == "completed")
-    new = sum(1 for i in items if i.get("status") == "new")
     canceled = sum(1 for i in items if i.get("status") == "canceled")
     no_show = sum(1 for i in items if i.get("status") == "no_show")
 
@@ -631,6 +641,7 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "📊 <b>Сводка за сегодня</b>\n\n"
         f"📅 Всего записей: <b>{total}</b>\n\n"
         f"🆕 Новые: <b>{new}</b>\n"
+        f"📌 Обработаны: <b>{processed}</b>\n"
         f"✅ Подтверждены: <b>{confirmed}</b>\n"
         f"✔️ Завершены: <b>{completed}</b>\n"
         f"❌ Отменены: <b>{canceled}</b>\n"
@@ -784,7 +795,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     action, appointment_id_raw = data.split(":", 1)
 
-    if action not in ["confirm", "cancel", "complete"]:
+    if action not in ["process", "confirm", "cancel", "complete"]:
         return
 
     try:
@@ -840,7 +851,9 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(f"Ошибка: {error or 'не удалось выполнить действие'}")
         return
 
-    if action == "confirm":
+    if action == "process":
+        status_label = "обработана"
+    elif action == "confirm":
         status_label = "подтверждена"
     else:
         status_label = "отменена"
