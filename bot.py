@@ -56,6 +56,9 @@ def get_main_keyboard(user_id: int | None = None) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
             [
                 ["📅 Записи на сегодня"],
+                ["🆕 Показать новые"],
+                ["📌 Показать обработанные"],
+                ["✅ Показать подтвержденные"],
             ],
             resize_keyboard=True,
         )
@@ -203,6 +206,30 @@ def wp_get_today_appointments() -> tuple[list[dict], str | None]:
     except Exception as e:
         logger.exception("wp_get_today_appointments failed: %s", e)
         return [], str(e)
+    
+def wp_get_appointments_by_status(status: str) -> tuple[list[dict], str | None]:
+    url = f"{WP_API_BASE}/telegram/appointments-by-status"
+    params = {
+        "secret": TELEGRAM_ADMIN_SECRET,
+        "status": status,
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=20)
+        data = response.json()
+
+        if response.status_code != 200:
+            return [], data.get("message") if isinstance(data, dict) else f"HTTP {response.status_code}"
+
+        if not isinstance(data, dict) or not data.get("success"):
+            return [], "appointments by status failed"
+
+        items = data.get("items") or []
+        return items if isinstance(items, list) else [], None
+
+    except Exception as e:
+        logger.exception("wp_get_appointments_by_status failed: %s", e)
+        return [], str(e)    
 
 
 def wp_fetch_reminders() -> tuple[list[dict], str | None]:
@@ -764,12 +791,74 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    if text == "📅 Записи на сегодня":
+        if text == "📅 Записи на сегодня":
         if not is_admin(telegram_user_id):
             await update.message.reply_text("Нет доступа")
             return
 
         await today_command(update, context)
+        return
+
+    status_buttons = {
+        "🆕 Показать новые": "new",
+        "📌 Показать обработанные": "processed",
+        "✅ Показать подтвержденные": "confirmed",
+    }
+
+    if text in status_buttons:
+        if not is_admin(telegram_user_id):
+            await update.message.reply_text("Нет доступа")
+            return
+
+        status = status_buttons[text]
+        items, error = wp_get_appointments_by_status(status)
+
+        if error:
+            await update.message.reply_text(f"❌ Ошибка получения записей: {error}")
+            return
+
+        if not items:
+            await update.message.reply_text("📭 Записей с таким статусом нет.")
+            return
+
+        for index, item in enumerate(items, start=1):
+            start_time = str(item.get("start_time", "—"))[:5]
+            end_time = str(item.get("end_time", "—"))[:5]
+
+            msg = (
+                f"🗓 <b>Запись #{index}</b>\n\n"
+                f"👤 <b>Клиент:</b> {item.get('client_name', '—')}\n"
+                f"📞 <b>Телефон:</b> {item.get('client_phone', '—')}\n\n"
+                f"💼 <b>Услуга:</b> {item.get('service_name', '—')}\n"
+                f"👨‍⚕️ <b>Специалист:</b> {item.get('employee_name', '—')}\n\n"
+                f"📅 <b>Дата:</b> {item.get('appointment_date', '—')}\n"
+                f"⏰ <b>Время:</b> {start_time}–{end_time}"
+            )
+
+            buttons = []
+
+            if status == "new":
+                buttons.append([
+                    InlineKeyboardButton("📌 Обработать", callback_data=f"process:{int(item['id'])}")
+                ])
+
+            if status in ["new", "processed"]:
+                buttons.append([
+                    InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{int(item['id'])}"),
+                    InlineKeyboardButton("❌ Отменить", callback_data=f"cancel:{int(item['id'])}")
+                ])
+
+            if status == "confirmed":
+                buttons.append([
+                    InlineKeyboardButton("✅ Завершить", callback_data=f"complete:{int(item['id'])}")
+                ])
+
+            await update.message.reply_text(
+                msg,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+            )
+
         return
 
     await update.message.reply_text(
@@ -857,6 +946,10 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         status_label = "подтверждена"
     else:
         status_label = "отменена"
+
+    if action == "process":
+        await query.message.reply_text("📌 Статус изменён: обработана")
+        return
 
     await query.edit_message_text(
         current_text + f"\n\n<b>Статус:</b> {status_label}",
