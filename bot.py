@@ -791,7 +791,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-        if text == "📅 Записи на сегодня":
+    if text == "📅 Записи на сегодня":
         if not is_admin(telegram_user_id):
             await update.message.reply_text("Нет доступа")
             return
@@ -865,7 +865,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         "Используйте кнопки ниже.",
         reply_markup=get_main_keyboard(telegram_user_id),
     )
-
 
 async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
